@@ -65,6 +65,11 @@ def test_print_config_is_valid_json() -> None:
     assert data["mcp"]["fusion"]["command"][0] == "uvx"
     assert data["mcp"]["fusion"]["enabled"] is True
     assert data["experimental"]["mcp_timeout"] == 90000
+    # Key is read from a file by default (shell-independent).
+    assert (
+        data["mcp"]["fusion"]["environment"]["OPENROUTER_API_KEY"]
+        == "{file:~/.config/openrouter/api_key}"
+    )
 
 
 def test_bundled_skill_has_frontmatter() -> None:

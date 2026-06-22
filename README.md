@@ -38,10 +38,20 @@ uvx openrouter-fusion-agent "Сравни ridge, lasso и elastic-net регре
 pip install openrouter-fusion-agent          # или: uv tool install openrouter-fusion-agent
 ```
 
-**Ключ API** (нужен и для CLI, и для opencode):
+**Ключ API** нужен только для прогонов fusion (`install-skill` и `print-config` работают без него). Получите ключ на https://openrouter.ai/keys.
+
+Надёжнее держать ключ в файле — это работает и для CLI, и для opencode, и не зависит от оболочки:
 ```bash
-export OPENROUTER_API_KEY=sk-or-v1-...
+mkdir -p ~/.config/openrouter && umask 077
+printf '%s' "sk-or-v1-..." > ~/.config/openrouter/api_key
 ```
+- **opencode (MCP):** `opencode.json` читает ключ из файла через `{file:...}` (см. сниппет ниже) — ничего экспортировать не нужно.
+- **CLI:** добавьте в `~/.zshrc` (или `~/.bashrc`) и откройте новый терминал:
+```bash
+export OPENROUTER_API_KEY="$(cat ~/.config/openrouter/api_key)"
+```
+
+> Альтернатива — `{env:OPENROUTER_API_KEY}` в `opencode.json`, если ключ уже экспортирован в оболочке, из которой запускается opencode.
 
 ## Использование
 
@@ -69,7 +79,7 @@ uvx openrouter-fusion-agent print-config
       "type": "local",
       "command": ["uvx", "openrouter-fusion-agent", "--mcp"],
       "enabled": true,
-      "environment": { "OPENROUTER_API_KEY": "{env:OPENROUTER_API_KEY}" },
+      "environment": { "OPENROUTER_API_KEY": "{file:~/.config/openrouter/api_key}" },
       "timeout": 10000
     }
   },
