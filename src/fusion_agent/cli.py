@@ -7,6 +7,7 @@ import asyncio
 import shlex
 import sys
 
+from . import __version__
 from . import server as server_module
 from .budget import BudgetTracker, get_key_info
 from .errors import FusionError
@@ -33,6 +34,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="fusion-agent",
         description="Multi-model deliberation agent for OpenRouter Fusion (free models).",
     )
+    parser.add_argument("--version", action="version", version=f"fusion-agent {__version__}")
     parser.add_argument("question", nargs="*", help="question to deliberate on; omit for REPL")
     parser.add_argument(
         "--mcp", action="store_true", help="run as an MCP stdio server (for opencode)"
