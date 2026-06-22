@@ -5,5 +5,11 @@ server tool backed entirely by free (``:free``) models, with budget-aware
 safeguards against rate limits and negative balances.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
 __all__ = ["__version__"]
+
+try:
+    __version__ = version("openrouter-fusion-agent")
+except PackageNotFoundError:  # running from source without install
+    __version__ = "0.0.0+unknown"
