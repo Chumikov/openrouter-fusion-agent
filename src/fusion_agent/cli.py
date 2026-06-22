@@ -13,6 +13,7 @@ from .budget import BudgetTracker, get_key_info
 from .errors import FusionError
 from .fusion import run_fusion
 from .http import build_client
+from .install import install_skill, print_config
 from .presets import get_preset
 from .render import render_result, render_status
 
@@ -164,8 +165,52 @@ async def _repl() -> int:
             print(f"unknown command: /{cmd}  (try /help)")
 
 
+def _run_install_skill(rest: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="fusion-agent install-skill",
+        description="Install the opencode fusion skill (SKILL.md).",
+    )
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--project", action="store_true", help="install into ./.opencode/skills/fusion (default)"
+    )
+    scope.add_argument(
+        "--global",
+        dest="global_",
+        action="store_true",
+        help="install into ~/.config/opencode/skills/fusion",
+    )
+    parser.add_argument("--force", action="store_true", help="overwrite an existing SKILL.md")
+    ns = parser.parse_args(rest)
+    target_scope = "global" if ns.global_ else "project"
+    try:
+        target = install_skill(scope=target_scope, force=ns.force)
+    except FileExistsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"installed skill -> {target}")
+    print("restart opencode to load it.")
+    return 0
+
+
+def _run_print_config(_rest: list[str]) -> int:
+    print(print_config())
+    return 0
+
+
+_SUBCOMMANDS = {
+    "install-skill": _run_install_skill,
+    "print-config": _run_print_config,
+}
+
+
 def main() -> None:
     """Console-script entry point."""
+    argv = sys.argv[1:]
+    if argv and argv[0] in _SUBCOMMANDS:
+        rc = _SUBCOMMANDS[argv[0]](argv[1:])
+        raise SystemExit(rc)
+
     parser = build_arg_parser()
     args = parser.parse_args()
 

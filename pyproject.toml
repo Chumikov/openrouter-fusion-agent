@@ -1,6 +1,6 @@
 [project]
 name = "openrouter-fusion-agent"
-version = "0.1.1"
+version = "0.1.2"
 description = "Multi-model deliberation agent for OpenRouter Fusion on free models — CLI + MCP server for opencode"
 readme = "README.md"
 license = { text = "MIT" }

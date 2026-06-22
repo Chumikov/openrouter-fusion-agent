@@ -1,74 +1,66 @@
 # openrouter-fusion-agent
 
-Multi-model deliberation agent for [OpenRouter Fusion](https://openrouter.ai/docs/guides/features/server-tools/fusion), running **entirely on free models**. Provides a CLI and an [MCP](https://modelcontextprotocol.io) server that you can plug into [opencode](https://opencode.ai) (or any MCP client).
+Агент много-модельного обсуждения для [OpenRouter Fusion](https://openrouter.ai/docs/guides/features/server-tools/fusion), работающий **полностью на бесплатных моделях**. Это CLI и [MCP](https://modelcontextprotocol.io)-сервер, который подключается к [opencode](https://opencode.ai) (или любому MCP-клиенту).
 
-Fusion runs a **panel** of models in parallel (each with web search), a **judge** compares their answers and returns structured analysis — consensus, contradictions, unique insights, blind spots — and your outer model writes a stronger final answer. OpenRouter ships this with expensive paid defaults; this project reconfigures it with free (`:free`) models and adds **budget-aware safeguards** against OpenRouter's free-tier rate limits.
+OpenRouter Fusion запускает **панель** моделей параллельно (у каждой — веб-поиск), **судья** сравнивает их ответы и возвращает структурированный анализ (консенсус, противоречия, уникальные идеи, слепые зоны), а внешняя модель пишет более сильный финальный ответ. У OpenRouter это по умолчанию дорогие платные модели; проект перенаправляет поток на бесплатные (`:free`) и добавляет **защиту от лимитов free-тиера**.
 
-## Features
+## Возможности
 
-- 100% free models (OpenRouter `:free` variants) — $0 per run.
-- Two presets: **quality** (diverse strong panel) and **budget** (smaller / faster).
-- Budget-aware: reads `GET /api/v1/key`, blocks on negative balance (HTTP 402), tracks the 50/1000 daily free-request cap, throttles to 20 RPM, retries on `429`.
-- **MCP server** (stdio) with `fusion_query` and `fusion_status` tools — native for opencode.
-- **CLI** one-shot + interactive REPL.
-- Typed (mypy strict), tested (pytest), MIT-licensed.
+- 100% бесплатные модели (варианты `:free`) — $0 за запуск.
+- Два пресета: **quality** (мощная разнородная панель) и **budget** (мельче/быстрее).
+- Budget-aware: читает `GET /api/v1/key`, блокирует при отрицательном балансе (HTTP 402), учитывает дневной лимит 50/1000 и 20 RPM, делает retry на 429.
+- MCP-сервер (stdio) с инструментами `fusion_query` и `fusion_status`.
+- CLI: разовый запрос + интерактивный REPL.
+- mypy strict, pytest, MIT.
 
-## Free model presets
+## Как это работает
 
-The panel is deliberately family-diverse so models produce less correlated answers.
-
-| Preset | Outer (decides + writes) | Panel (parallel) | Judge (analysis) |
-| --- | --- | --- | --- |
-| `quality` (default) | `qwen/qwen3-next-80b-a3b-instruct:free` | `openai/gpt-oss-120b:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `meta-llama/llama-3.3-70b-instruct:free` | `nvidia/nemotron-3-ultra-550b-a55b:free` |
-| `budget` | `qwen/qwen3-next-80b-a3b-instruct:free` | `google/gemma-4-26b-a4b-it:free`, `nvidia/nemotron-3-nano-30b-a3b:free`, `openai/gpt-oss-20b:free` | `nvidia/nemotron-3-super-120b-a12b:free` |
-
-A run costs roughly `len(panel) + 2` completions (5 for the default panel).
-
-## Free-tier limits (why budget awareness matters)
-
-OpenRouter free models are limited to **20 requests/minute** and a **daily cap** of **50 requests/day** if you've purchased **< $10** of credits, or **1000/day** at **≥ $10** (the calls themselves still cost $0). A negative account balance raises HTTP **402 even on free models**. This agent reads `GET /api/v1/key` to detect `is_free_tier` and the balance, and enforces the caps so you don't hit hard failures mid-run. Tip: adding ≥ $10 of credits lifts the daily cap to 1000 while keeping every call free.
-
-## Installation
-
-Requires Python ≥ 3.11.
-
-```bash
-# from source
-git clone https://github.com/Chumikov/openrouter-fusion-agent
-cd openrouter-fusion-agent
-uv sync                          # or: pip install -e ".[dev]"
-
-# or once published to PyPI
-uvx openrouter-fusion-agent --help
+```
+вопрос ─▶ внешняя модель ─openrouter:fusion─▶ панель (≤3 free-модели + web_search)
+                                                 │
+                                                 ▼
+                              судья (free-модель + web_search) ─анализ─▶ внешняя модель ─▶ финальный ответ
 ```
 
-Set your API key:
+Внешняя модель вызывает серверный инструмент `openrouter:fusion`. Судья возвращает структурированный анализ, который внешняя модель использует для финального ответа. Агент возвращает финальный ответ, стоимость и список участвовавших моделей.
 
+## Установка
+
+Требуется Python ≥ 3.11 и ключ OpenRouter (https://openrouter.ai/keys).
+
+**Без установки** (пакет уже на [PyPI](https://pypi.org/project/openrouter-fusion-agent/)):
+```bash
+uvx openrouter-fusion-agent "Сравни ridge, lasso и elastic-net регрессию"
+```
+
+**Установка:**
+```bash
+pip install openrouter-fusion-agent          # или: uv tool install openrouter-fusion-agent
+```
+
+**Ключ API** (нужен и для CLI, и для opencode):
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-## CLI usage
+## Использование
 
+**CLI:**
 ```bash
-# one-shot deliberation
-fusion-agent "Compare ridge, lasso and elastic-net regression. Where does each shine?"
+fusion-agent "Сравни ridge, lasso и elastic-net. Где какая сильнее?"
 
-# REPL
-fusion-agent
+fusion-agent              # интерактивный REPL
 fusion> /status
-fusion> Compare the strongest arguments for and against a carbon tax.
 fusion> /quit
 ```
+Команды REPL: `/status`, `/force on|off`, `/panel 1|2|3`, `/preset quality|budget`, `/budget <n>`, `/help`, `/quit`.
+Флаги: `--force on|off` (по умолчанию `on`), `--panel N`, `--preset quality|budget`, `--budget N`.
 
-REPL commands: `/status`, `/force on|off`, `/panel 1|2|3`, `/preset quality|budget`, `/budget <n>` (override daily cap), `/help`, `/quit`.
-
-Flags: `--force on|off` (default `on` — guarantees fusion is invoked), `--panel N`, `--preset quality|budget`, `--budget N`.
-
-## opencode integration (MCP)
-
-Add the agent as a local MCP server in your `opencode.json` (see [`examples/opencode.json`](examples/opencode.json)):
-
+**opencode (MCP)** — получить готовый блок для `opencode.json`:
+```bash
+uvx openrouter-fusion-agent print-config
+```
+или вписать вручную:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
@@ -84,44 +76,31 @@ Add the agent as a local MCP server in your `opencode.json` (see [`examples/open
   "experimental": { "mcp_timeout": 90000 }
 }
 ```
+После правки конфига перезапустите opencode.
 
-Notes:
-- `experimental.mcp_timeout` is raised to ~90s because a fusion run takes 30–60s.
-- Until the package is on PyPI, point `command` at a local checkout instead:
-  `["uv", "run", "--directory", "/path/to/openrouter-fusion-agent", "fusion-agent", "--mcp"]`
-- Restart opencode after editing config (it loads config once at startup).
-
-Optionally drop the example skill from [`examples/skill/fusion/SKILL.md`](examples/skill/fusion/SKILL.md) into `.opencode/skills/fusion/SKILL.md` so opencode knows **when** to call fusion automatically.
-
-Then in a session:
-
-```
-use the fusion tool to survey the arguments for and against universal basic income
-```
-
-## How it works
-
-```
-your question ─▶ outer model ─calls openrouter:fusion─▶ panel (≤3 free models + web_search)
-                                                            │
-                                                            ▼
-                                          judge (free model + web_search) ─structured analysis─▶ outer model ─▶ final answer
-```
-
-The outer model invokes OpenRouter's `openrouter:fusion` server tool. The judge returns a structured analysis (consensus / contradictions / partial coverage / unique insights / blind spots) which the outer model consumes to write the final answer. The structured analysis is consumed internally; this agent surfaces it best-effort when OpenRouter echoes it, and always returns the final answer, cost, and which models ran.
-
-## Development
-
+**Скилл (опционально).** Чтобы opencode сам вызывал fusion по подходящим запросам (исследование, сравнение, «аргументы за и против»), установите файл-подсказку:
 ```bash
-uv sync --extra dev
-uv run ruff format .
-uv run ruff check .
-uv run mypy src/fusion_agent
-uv run pytest -q
+uvx openrouter-fusion-agent install-skill            # в текущий проект: .opencode/skills/fusion/
+uvx openrouter-fusion-agent install-skill --global   # глобально: ~/.config/opencode/skills/fusion/
+uvx openrouter-fusion-agent install-skill --force    # перезаписать существующий
 ```
+Работает на Linux, macOS и Windows (WSL). Для нестандартного расположения конфига opencode задайте `OPENCODE_CONFIG_DIR` — команда учтёт его.
 
-CI runs the same on every push/PR (`.github/workflows/ci.yml`).
+## Пресеты free-моделей
 
-## License
+Панель сознательно составлена из разных семейств — ответы меньше коррелируют.
+
+| Пресет | Внешняя (решает + пишет) | Панель (параллельно) | Судья (анализ) |
+| --- | --- | --- | --- |
+| `quality` (по умолчанию) | `qwen/qwen3-next-80b-a3b-instruct:free` | `openai/gpt-oss-120b:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `meta-llama/llama-3.3-70b-instruct:free` | `nvidia/nemotron-3-ultra-550b-a55b:free` |
+| `budget` | `qwen/qwen3-next-80b-a3b-instruct:free` | `google/gemma-4-26b-a4b-it:free`, `nvidia/nemotron-3-nano-30b-a3b:free`, `openai/gpt-oss-20b:free` | `nvidia/nemotron-3-super-120b-a12b:free` |
+
+Один прогон ≈ `len(panel) + 2` запросов (5 для панели по умолчанию).
+
+## Лимиты free-тиера
+
+Бесплатные модели OpenRouter: **20 запросов/мин** и дневной лимит **50/день** при балансе **< $10** либо **1000/день** при **≥ $10** (сами вызовы остаются $0). Отрицательный баланс даёт HTTP **402 даже на free-моделях**. Агент читает `GET /api/v1/key`, определяет `is_free_tier` и баланс и соблюдает лимиты, чтобы не падать посреди прогона. Совет: пополнение ≥ $10 снимает дневной лимит до 1000, не делая вызовы платными.
+
+## Лицензия
 
 MIT © Chumikov
