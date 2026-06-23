@@ -11,6 +11,7 @@ import respx
 from fusion_agent.budget import BudgetTracker
 from fusion_agent.errors import FusionAPIError, FusionBudgetError
 from fusion_agent.fusion import (
+    ProgressUpdate,
     build_payload,
     estimate_request_count,
     parse_completion,
@@ -69,6 +70,11 @@ def test_build_payload_outer_judge_overrides() -> None:
     )
     assert payload["model"] == "custom/outer:free"
     assert payload["tools"][0]["parameters"]["model"] == "custom/judge:free"
+
+
+def test_build_payload_max_completion_tokens_at_top_level() -> None:
+    payload, _ = build_payload("hi", CONFIG, force=True, max_completion_tokens=5000)
+    assert payload["max_completion_tokens"] == 5000
 
 
 def test_build_payload_respects_panel_size() -> None:
@@ -386,13 +392,13 @@ async def test_run_fusion_rotates_when_model_calls_wrong_tool(
 async def test_run_fusion_progress_notifications(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """on_progress callback receives status messages during execution."""
+    """on_progress callback receives ProgressUpdate messages during execution."""
     _no_backoff(monkeypatch)
     respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=sample_completion(answer="ok")))
     messages: list[str] = []
 
-    async def capture(msg: str) -> None:
-        messages.append(msg)
+    async def capture(update: ProgressUpdate) -> None:
+        messages.append(update.message)
 
     result = await run_fusion(
         client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000), on_progress=capture

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -36,12 +37,24 @@ BACKOFF_MAX = 20.0
 RETRY_AFTER_SHORT = 10.0  # seconds; if Retry-After <= this, wait + retry same model
 
 PROBE_TIMEOUT = 15.0
-HEARTBEAT_INTERVAL = 30.0  # seconds between progress heartbeats during HTTP wait
+HEARTBEAT_INTERVAL = 15.0  # seconds between progress heartbeats during HTTP wait
+DEFAULT_MAX_COMPLETION_TOKENS = 5000
+ESTIMATED_RUN_SECONDS = 120.0  # rough estimate for progress percentage
 
 # Default per-run cost estimate (free models == $0).
 FREE_COST_USD = 0.0
 
-ProgressCallback = Callable[[str], Awaitable[None]]
+
+@dataclass
+class ProgressUpdate:
+    """A progress notification sent during fusion execution."""
+
+    message: str
+    elapsed: float = 0.0
+    percent: int | None = None
+
+
+ProgressCallback = Callable[[ProgressUpdate], Awaitable[None]]
 
 
 @dataclass
@@ -99,6 +112,8 @@ def build_payload(
         "messages": [{"role": "user", "content": question}],
         "tools": [{"type": "openrouter:fusion", "parameters": parameters}],
     }
+    if max_completion_tokens is not None:
+        payload["max_completion_tokens"] = max_completion_tokens
     if force:
         payload["tool_choice"] = "required"
     return payload, panel
@@ -272,10 +287,14 @@ async def _post_with_heartbeat(
     *,
     max_retries: int = MAX_RETRIES,
     on_progress: ProgressCallback | None = None,
+    start_time: float = 0.0,
 ) -> dict[str, Any]:
     """Wrap _post_with_retry with periodic progress heartbeats."""
     if on_progress is None:
         return await _post_with_retry(client, payload, max_retries=max_retries)
+
+    if start_time == 0.0:
+        start_time = time.monotonic()
 
     task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
         _post_with_retry(client, payload, max_retries=max_retries)
@@ -285,7 +304,15 @@ async def _post_with_heartbeat(
             return await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_INTERVAL)
         except TimeoutError:
             if not task.done():
-                await on_progress("Still processing (panel + judge running server-side)...")
+                elapsed = time.monotonic() - start_time
+                pct = min(5 + int(elapsed / ESTIMATED_RUN_SECONDS * 85), 90)
+                await on_progress(
+                    ProgressUpdate(
+                        message=f"Still processing ({elapsed:.0f}s elapsed)...",
+                        elapsed=elapsed,
+                        percent=pct,
+                    )
+                )
             continue
 
 
@@ -375,20 +402,23 @@ async def run_fusion(
     force: bool = True,
     panel_size: int | None = None,
     tracker: BudgetTracker | None = None,
-    max_completion_tokens: int | None = None,
+    max_completion_tokens: int | None = DEFAULT_MAX_COMPLETION_TOKENS,
     max_tool_calls: int | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> FusionResult:
     """Execute a single fusion deliberation with automatic model rotation."""
     panels = _resolve_panels(config, panel_size)
     request_count = estimate_request_count(panels[0])
+    start = time.monotonic()
 
-    async def _progress(msg: str) -> None:
+    async def _progress(msg: str, percent: int | None = None) -> None:
         if on_progress is not None:
-            await on_progress(msg)
+            elapsed = time.monotonic() - start
+            await on_progress(ProgressUpdate(message=msg, elapsed=elapsed, percent=percent))
 
     await _progress(
-        f"outer={config.primary_outer}, panel={list(panels[0])}, judge={config.primary_judge}"
+        f"outer={config.primary_outer}, panel={list(panels[0])}, judge={config.primary_judge}",
+        percent=2,
     )
 
     if tracker is not None:
@@ -435,7 +465,8 @@ async def run_fusion(
 
                 await _progress(
                     f"Sending fusion request to {outer_model} "
-                    f"(panel={len(resolved_panel)}, judge={judge_model})..."
+                    f"(panel={len(resolved_panel)}, judge={judge_model})...",
+                    percent=5,
                 )
 
                 try:
@@ -444,6 +475,7 @@ async def run_fusion(
                         payload,
                         max_retries=MAX_RETRIES if is_last else 1,
                         on_progress=on_progress,
+                        start_time=start,
                     )
                 except FusionAPIError as exc:
                     if not is_last and _is_rotatable(exc):
@@ -451,7 +483,7 @@ async def run_fusion(
                         await _progress(
                             f"{outer_model}: HTTP {exc.status_code}, rotating to next model..."
                         )
-                        break  # outer unavailable → next outer
+                        break
                     raise
 
                 result = parse_completion(
@@ -465,7 +497,7 @@ async def run_fusion(
                     await _progress(
                         f"{outer_model}: {result.failure_reason}, trying next composition..."
                     )
-                    continue  # server-side panel/judge failure → next combo
+                    continue
 
                 if tracker is not None:
                     tracker.record(request_count)
@@ -473,11 +505,11 @@ async def run_fusion(
                     result.cost_usd = FREE_COST_USD
                 if tried:
                     result.models_tried = tried
-                await _progress(f"Fusion complete: status={result.status}")
+                await _progress(f"Fusion complete: status={result.status}", percent=100)
                 return result
             else:
-                continue  # judge loop exhausted without break → next panel
-            break  # outer broke → next outer
+                continue
+            break
 
     await _progress("All model candidates exhausted")
     raise FusionAPIError(
@@ -496,6 +528,7 @@ def _resolve_panels(config: ModelConfig, panel_size: int | None) -> list[tuple[s
 __all__ = [
     "FusionResult",
     "KeyInfo",
+    "ProgressUpdate",
     "build_payload",
     "estimate_request_count",
     "get_key_info",

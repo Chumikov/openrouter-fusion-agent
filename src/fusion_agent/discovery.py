@@ -115,33 +115,49 @@ def pick_diverse(sorted_pool: list[ModelInfo], count: int) -> list[ModelInfo]:
     return picked
 
 
+PANEL_MAX_B = 50.0  # panel models: fast, <= this size
+OUTER_MAX_B = 150.0  # outer/judge: avoid impractically slow huge models
+
+
 def select_models(models: list[ModelInfo], *, min_b: float = 20) -> ModelSelection:
     """Select ordered candidate lists for outer / panel / judge roles.
+
+    **Outer/judge** are picked from strong models (>= 70B) for reasoning quality.
+    **Panel** is picked from fast models (< 50B) for quick parallel execution.
+    All groups prioritise family diversity.
 
     Returns a :class:`ModelSelection` ordered by priority (primary first, then
     backups).
     """
     pool = [m for m in models if m.param_count is not None and m.param_count >= min_b]
     if len(pool) < 5:
-        # Too few large models — relax the threshold and take the top by size.
         pool = sorted(models, key=lambda m: m.param_count or 0, reverse=True)[:8]
 
     sorted_pool = sorted(pool, key=lambda m: m.param_count or 0, reverse=True)
 
-    outer = pick_diverse(sorted_pool, 3)
-    judge_pool = [m for m in sorted_pool if m.family != outer[0].family] if outer else sorted_pool
+    # Outer + judge: strong models (70-150B), diverse families.
+    strong_pool = [
+        m for m in sorted_pool
+        if 70 <= (m.param_count or 0) <= OUTER_MAX_B
+    ]
+    if len(strong_pool) < 3:
+        strong_pool = sorted_pool[:5]
+    outer = pick_diverse(strong_pool, 3)
+    judge_pool = [m for m in strong_pool if m.family != outer[0].family] if outer else strong_pool
     if not judge_pool:
-        judge_pool = sorted_pool
+        judge_pool = strong_pool
     judge = pick_diverse(judge_pool, 2)
 
-    # Primary panel: 3 models from 3 distinct families.
-    panel_primary = pick_diverse(sorted_pool, 3)
-    # Backup panel: alternative models, prioritising families not in primary.
+    # Panel: fast models (< 50B) for quick parallel execution.
+    fast_pool = [m for m in sorted_pool if (m.param_count or 0) < PANEL_MAX_B]
+    if len(fast_pool) < 2:
+        fast_pool = sorted_pool  # fallback: use all models if too few fast ones
+    panel_primary = pick_diverse(fast_pool, 3)
+
+    # Backup panel: alternative fast models, or strong models as last resort.
     used_ids = {m.id for m in panel_primary}
-    backup_pool = [m for m in sorted_pool if m.id not in used_ids]
+    backup_pool = [m for m in fast_pool if m.id not in used_ids]
     backup_panel = pick_diverse(backup_pool, 3) if backup_pool else []
-    # If not enough distinct families for a full backup, reuse primary models
-    # to ensure at least 2 in the backup composition.
     if len(backup_panel) < 2:
         for m in panel_primary:
             if m not in backup_panel:

@@ -19,7 +19,7 @@ from .discovery import (
     select_models,
 )
 from .errors import FusionError
-from .fusion import FusionResult, estimate_request_count, run_fusion
+from .fusion import FusionResult, ProgressUpdate, estimate_request_count, run_fusion
 from .http import build_client
 from .presets import get_config, pick_panel, reload_config
 
@@ -68,8 +68,10 @@ async def fusion_query(
         client, tracker, _info = await _ensure()
         config = get_config()
 
-        async def report(msg: str) -> None:
-            await ctx.info(msg)
+        async def report(update: ProgressUpdate) -> None:
+            await ctx.info(update.message)
+            if update.percent is not None:
+                await ctx.report_progress(update.percent, 100)
 
         result: FusionResult = await run_fusion(
             client,

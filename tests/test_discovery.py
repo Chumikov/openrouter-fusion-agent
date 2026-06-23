@@ -126,12 +126,13 @@ def test_select_models_judge_not_outer_family() -> None:
     assert outer_family not in judge_families
 
 
-def test_select_models_panel_has_three_diverse() -> None:
+def test_select_models_panel_is_diverse_and_fast() -> None:
+    """Panel uses fast models (< 50B) from diverse families, min 2."""
     result = select_models(_make_models(), min_b=20)
     panel = result["panel"][0]  # type: ignore[index]
-    assert len(panel) == 3
+    assert len(panel) >= 2
     panel_families = {m.split("/")[0] for m in panel}
-    assert len(panel_families) == 3
+    assert len(panel_families) == len(panel)  # all distinct families
 
 
 def test_select_models_generates_backup_panel() -> None:
@@ -149,6 +150,34 @@ def test_select_models_all_panels_meet_minimum() -> None:
     result = select_models(_make_models(), min_b=20)
     for panel in result["panel"]:  # type: ignore[index]
         assert len(panel) >= 2
+
+
+def test_select_models_panel_uses_fast_models() -> None:
+    """Panel models should be < 50B (fast), outer/judge >= 70B (strong)."""
+    models = _make_models()
+    result = select_models(models, min_b=20)
+    panel = result["panel"][0]  # type: ignore[index]
+    # Look up each panel model's param_count from the input.
+    by_id = {m.id: m for m in models}
+    for model_id in panel:
+        info = by_id.get(model_id)
+        if info and info.param_count:
+            assert info.param_count < 50, (
+                f"panel model {model_id} is {info.param_count}B, expected < 50B"
+            )
+
+
+def test_select_models_outer_uses_strong_models() -> None:
+    """Outer models should be >= 70B for reasoning quality."""
+    models = _make_models()
+    result = select_models(models, min_b=20)
+    by_id = {m.id: m for m in models}
+    for model_id in result["outer"]:  # type: ignore[index]
+        info = by_id.get(model_id)
+        if info and info.param_count:
+            assert info.param_count >= 70, (
+                f"outer model {model_id} is {info.param_count}B, expected >= 70B"
+            )
 
 
 def test_select_models_relaxes_threshold_when_few() -> None:
