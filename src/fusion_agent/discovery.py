@@ -136,10 +136,7 @@ def select_models(models: list[ModelInfo], *, min_b: float = 20) -> ModelSelecti
     sorted_pool = sorted(pool, key=lambda m: m.param_count or 0, reverse=True)
 
     # Outer + judge: strong models (70-150B), diverse families.
-    strong_pool = [
-        m for m in sorted_pool
-        if 70 <= (m.param_count or 0) <= OUTER_MAX_B
-    ]
+    strong_pool = [m for m in sorted_pool if 70 <= (m.param_count or 0) <= OUTER_MAX_B]
     if len(strong_pool) < 3:
         strong_pool = sorted_pool[:5]
     outer = pick_diverse(strong_pool, 3)
