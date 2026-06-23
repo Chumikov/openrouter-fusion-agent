@@ -9,7 +9,7 @@ import httpx
 from .errors import FusionConfigError
 
 API_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_TIMEOUT = 120.0
+DEFAULT_TIMEOUT = 300.0
 
 
 def get_api_key() -> str:

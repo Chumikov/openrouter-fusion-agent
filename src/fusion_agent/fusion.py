@@ -280,7 +280,19 @@ async def _post_with_retry(
                 error_type=error_type,
             )
 
-        return response.json()  # type: ignore[no-any-return]
+        try:
+            return response.json()  # type: ignore[no-any-return]
+        except ValueError as exc:
+            if attempt < max_retries:
+                logger.warning("invalid JSON on attempt %d: %s", attempt, exc)
+                await _backoff(attempt)
+                continue
+            raise FusionAPIError(
+                f"OpenRouter returned invalid JSON: {exc}",
+                status_code=502,
+                body=response.text[:500],
+                error_type="provider_unavailable",
+            ) from exc
 
     raise FusionAPIError(
         f"fusion request failed after {max_retries + 1} attempts: {last_error}",

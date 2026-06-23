@@ -309,3 +309,25 @@ async def test_run_fusion_retry_after_short_retries_same_model(
     assert route.call_count == 2
     assert result.final_answer == "waited"
     assert 3.0 in delays
+
+
+@respx.mock
+async def test_run_fusion_invalid_json_retries_then_rotates(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """200 OK with invalid JSON body → retry → if persistent, rotate (treated as 502)."""
+    _no_backoff(monkeypatch)
+    primary = CONFIG.primary_outer
+    backup = CONFIG.outer[1]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _request_model(request) == primary:
+            # 200 OK but body is not valid JSON.
+            return httpx.Response(200, text="<html>Gateway Error</html>")
+        return httpx.Response(200, json=sample_completion(model=backup))
+
+    respx.post(CHAT_URL).mock(side_effect=handler)
+    result = await run_fusion(client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000))
+    assert result.ok
+    assert result.outer == backup
+    assert result.models_tried is not None
