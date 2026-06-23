@@ -34,7 +34,8 @@ Call the `fusion_query` tool with the user's question. Optionally check
 rate-limited to 20 req/min and a daily cap of 50 or 1000 depending on credits).
 
 ```jsonc
-// fusion_query(question: string, force?: boolean, panel_size?: 1|2|3)
+// fusion_query(question: string, force?: boolean, panel_size?: 2|3)
+// panel_size defaults to 3 (full panel). Minimum is 2 — do not set to 1.
 ```
 
 When free models change (new ones appear, old ones are deprecated), call

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .budget import BudgetTracker, get_key_info
 from .discovery import (
@@ -50,6 +50,8 @@ async def fusion_query(
     question: str,
     force: bool = True,
     panel_size: int | None = None,
+    *,
+    ctx: Context[Any],  # type: ignore[type-arg]
 ) -> dict[str, Any]:
     """Run an OpenRouter Fusion multi-model deliberation using free models.
 
@@ -62,11 +64,15 @@ async def fusion_query(
     Args:
         question: The prompt to deliberate on.
         force: When True (default) the outer model is required to invoke fusion.
-        panel_size: Optional panel size (1-3). Smaller when budget is low.
+        panel_size: Panel size: 2 or 3 (default: 3). Cannot be less than 2.
     """
     try:
         client, tracker, _info = await _ensure()
         config = get_config()
+
+        async def report(msg: str) -> None:
+            await ctx.info(msg)
+
         result: FusionResult = await run_fusion(
             client,
             question,
@@ -74,6 +80,7 @@ async def fusion_query(
             force=force,
             panel_size=panel_size,
             tracker=tracker,
+            on_progress=report,
         )
         return result.to_dict()
     except FusionError as exc:
@@ -102,7 +109,11 @@ async def fusion_status() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def fusion_refresh_models(min_b: int = 20) -> dict[str, Any]:
+async def fusion_refresh_models(
+    min_b: int = 20,
+    *,
+    ctx: Context[Any],  # type: ignore[type-arg]
+) -> dict[str, Any]:
     """Discover current free models from OpenRouter and update the local selection.
 
     Queries ``GET /api/v1/models``, filters for free models with tool support,
@@ -116,10 +127,13 @@ async def fusion_refresh_models(min_b: int = 20) -> dict[str, Any]:
     """
     try:
         client, _tracker, _info = await _ensure()
+        await ctx.info("Querying OpenRouter model catalog...")
         models = await fetch_free_tool_models(client)
+        await ctx.info(f"Found {len(models)} free models with tool support")
         selection = select_models(models, min_b=float(min_b))
         path = save_selection(models_file_path(), selection, total_found=len(models))
         reload_config()
+        await ctx.info(f"Saved to {path}")
         return {
             "path": str(path),
             "models_found": len(models),

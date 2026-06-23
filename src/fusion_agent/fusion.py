@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -35,9 +36,12 @@ BACKOFF_MAX = 20.0
 RETRY_AFTER_SHORT = 10.0  # seconds; if Retry-After <= this, wait + retry same model
 
 PROBE_TIMEOUT = 15.0
+HEARTBEAT_INTERVAL = 30.0  # seconds between progress heartbeats during HTTP wait
 
 # Default per-run cost estimate (free models == $0).
 FREE_COST_USD = 0.0
+
+ProgressCallback = Callable[[str], Awaitable[None]]
 
 
 @dataclass
@@ -262,6 +266,29 @@ async def probe_model(client: httpx.AsyncClient, model: str) -> bool:
         return False
 
 
+async def _post_with_heartbeat(
+    client: httpx.AsyncClient,
+    payload: dict[str, Any],
+    *,
+    max_retries: int = MAX_RETRIES,
+    on_progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Wrap _post_with_retry with periodic progress heartbeats."""
+    if on_progress is None:
+        return await _post_with_retry(client, payload, max_retries=max_retries)
+
+    task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
+        _post_with_retry(client, payload, max_retries=max_retries)
+    )
+    while True:
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_INTERVAL)
+        except TimeoutError:
+            if not task.done():
+                await on_progress("Still processing (panel + judge running server-side)...")
+            continue
+
+
 async def _post_with_retry(
     client: httpx.AsyncClient, payload: dict[str, Any], *, max_retries: int = MAX_RETRIES
 ) -> dict[str, Any]:
@@ -350,10 +377,19 @@ async def run_fusion(
     tracker: BudgetTracker | None = None,
     max_completion_tokens: int | None = None,
     max_tool_calls: int | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> FusionResult:
     """Execute a single fusion deliberation with automatic model rotation."""
     panels = _resolve_panels(config, panel_size)
     request_count = estimate_request_count(panels[0])
+
+    async def _progress(msg: str) -> None:
+        if on_progress is not None:
+            await on_progress(msg)
+
+    await _progress(
+        f"outer={config.primary_outer}, panel={list(panels[0])}, judge={config.primary_judge}"
+    )
 
     if tracker is not None:
         await tracker.throttle_rpm(request_count)
@@ -368,12 +404,13 @@ async def run_fusion(
     judge_models = list(config.judge)
 
     for o_idx, outer_model in enumerate(outer_models):
-        # Lazy probe: primary (idx 0) is tested by the real POST; backups are probed.
         if o_idx > 0:
+            await _progress(f"Probing backup: {outer_model}...")
             if not await probe_model(client, outer_model):
                 tried.append(f"{outer_model}: unavailable (probe)")
                 if tracker is not None:
                     tracker.record(1)
+                await _progress(f"{outer_model}: unavailable, trying next...")
                 continue
             if tracker is not None:
                 tracker.record(1)
@@ -396,13 +433,24 @@ async def run_fusion(
                     max_tool_calls=max_tool_calls,
                 )
 
+                await _progress(
+                    f"Sending fusion request to {outer_model} "
+                    f"(panel={len(resolved_panel)}, judge={judge_model})..."
+                )
+
                 try:
-                    data = await _post_with_retry(
-                        client, payload, max_retries=MAX_RETRIES if is_last else 1
+                    data = await _post_with_heartbeat(
+                        client,
+                        payload,
+                        max_retries=MAX_RETRIES if is_last else 1,
+                        on_progress=on_progress,
                     )
                 except FusionAPIError as exc:
                     if not is_last and _is_rotatable(exc):
                         tried.append(f"{outer_model}: HTTP {exc.status_code} ({exc.error_type})")
+                        await _progress(
+                            f"{outer_model}: HTTP {exc.status_code}, rotating to next model..."
+                        )
                         break  # outer unavailable → next outer
                     raise
 
@@ -414,6 +462,9 @@ async def run_fusion(
 
                 if result.status != "ok" and result.failure_reason and not is_last:
                     tried.append(f"fusion[{outer_model}/{judge_model}]: {result.failure_reason}")
+                    await _progress(
+                        f"{outer_model}: {result.failure_reason}, trying next composition..."
+                    )
                     continue  # server-side panel/judge failure → next combo
 
                 if tracker is not None:
@@ -422,11 +473,13 @@ async def run_fusion(
                     result.cost_usd = FREE_COST_USD
                 if tried:
                     result.models_tried = tried
+                await _progress(f"Fusion complete: status={result.status}")
                 return result
             else:
                 continue  # judge loop exhausted without break → next panel
             break  # outer broke → next outer
 
+    await _progress("All model candidates exhausted")
     raise FusionAPIError(
         f"all model candidates exhausted; tried: {'; '.join(tried) or 'none'}",
         status_code=429,

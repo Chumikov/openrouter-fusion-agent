@@ -133,13 +133,31 @@ def select_models(models: list[ModelInfo], *, min_b: float = 20) -> ModelSelecti
     if not judge_pool:
         judge_pool = sorted_pool
     judge = pick_diverse(judge_pool, 2)
-    panel = [pick_diverse(sorted_pool, 3)]
 
-    return {
-        "outer": [m.id for m in outer],
-        "panel": [[m.id for m in p] for p in panel],
-        "judge": [m.id for m in judge],
-    }
+    # Primary panel: 3 models from 3 distinct families.
+    panel_primary = pick_diverse(sorted_pool, 3)
+    # Backup panel: alternative models, prioritising families not in primary.
+    used_ids = {m.id for m in panel_primary}
+    backup_pool = [m for m in sorted_pool if m.id not in used_ids]
+    backup_panel = pick_diverse(backup_pool, 3) if backup_pool else []
+    # If not enough distinct families for a full backup, reuse primary models
+    # to ensure at least 2 in the backup composition.
+    if len(backup_panel) < 2:
+        for m in panel_primary:
+            if m not in backup_panel:
+                backup_panel.append(m)
+            if len(backup_panel) >= 2:
+                break
+
+    panels = [panel_primary]
+    if len(backup_panel) >= 2:
+        panels.append(backup_panel)
+
+    return ModelSelection(
+        outer=[m.id for m in outer],
+        panel=[[m.id for m in p] for p in panels],
+        judge=[m.id for m in judge],
+    )
 
 
 # ---------------------------------------------------------------------------

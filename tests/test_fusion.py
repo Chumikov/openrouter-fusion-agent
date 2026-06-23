@@ -380,3 +380,25 @@ async def test_run_fusion_rotates_when_model_calls_wrong_tool(
     assert result.outer == backup
     assert result.models_tried is not None
     assert any("web_search" in entry for entry in result.models_tried)
+
+
+@respx.mock
+async def test_run_fusion_progress_notifications(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """on_progress callback receives status messages during execution."""
+    _no_backoff(monkeypatch)
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=sample_completion(answer="ok")))
+    messages: list[str] = []
+
+    async def capture(msg: str) -> None:
+        messages.append(msg)
+
+    result = await run_fusion(
+        client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000), on_progress=capture
+    )
+    assert result.ok
+    # At minimum: model composition, "Sending fusion request", "Fusion complete"
+    assert any("outer=" in m for m in messages)
+    assert any("Sending fusion request" in m for m in messages)
+    assert any("Fusion complete" in m for m in messages)

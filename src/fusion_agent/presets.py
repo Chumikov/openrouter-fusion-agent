@@ -108,28 +108,41 @@ def reload_config() -> None:
     _cached = None
 
 
+MIN_PANEL_SIZE = 2
+
+
 def pick_panel(config: ModelConfig, size: int | None = None) -> tuple[str, ...]:
-    """Return the primary panel, optionally trimmed to *size* members."""
+    """Return the primary panel, optionally trimmed to *size* members.
+
+    The minimum panel size is :data:`MIN_PANEL_SIZE` (2).  Passing a smaller
+    value raises ``ValueError``.
+    """
     primary = config.primary_panel
     if size is None:
         return primary
-    if not 1 <= size <= len(primary):
-        raise ValueError(f"panel_size must be between 1 and {len(primary)}, got {size}")
+    if size < MIN_PANEL_SIZE:
+        raise ValueError(f"panel_size must be >= {MIN_PANEL_SIZE}, got {size}")
+    if size > len(primary):
+        raise ValueError(f"panel_size must be <= {len(primary)}, got {size}")
     return primary[:size]
 
 
 def panel_candidates(config: ModelConfig, size: int | None = None) -> list[tuple[str, ...]]:
-    """Return all panel compositions (trimmed to *size*), primary first."""
+    """Return all panel compositions (trimmed to *size*), primary first.
+
+    Compositions smaller than :data:`MIN_PANEL_SIZE` are skipped.
+    """
     result: list[tuple[str, ...]] = []
     for panel in config.panel:
         trimmed = panel[:size] if size is not None else panel
-        if trimmed:
+        if len(trimmed) >= MIN_PANEL_SIZE:
             result.append(trimmed)
     return result
 
 
 __all__ = [
     "DEFAULT_CONFIG",
+    "MIN_PANEL_SIZE",
     "ModelConfig",
     "get_config",
     "panel_candidates",

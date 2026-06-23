@@ -134,6 +134,23 @@ def test_select_models_panel_has_three_diverse() -> None:
     assert len(panel_families) == 3
 
 
+def test_select_models_generates_backup_panel() -> None:
+    """With enough models, select_models should generate >= 2 panel compositions."""
+    result = select_models(_make_models(), min_b=20)
+    panels = result["panel"]  # type: ignore[index]
+    assert len(panels) >= 2, f"expected >= 2 panel compositions, got {len(panels)}"
+    # Each composition must have >= 2 models.
+    for panel in panels:
+        assert len(panel) >= 2, f"panel composition too small: {panel}"
+
+
+def test_select_models_all_panels_meet_minimum() -> None:
+    """No panel composition should have fewer than 2 models."""
+    result = select_models(_make_models(), min_b=20)
+    for panel in result["panel"]:  # type: ignore[index]
+        assert len(panel) >= 2
+
+
 def test_select_models_relaxes_threshold_when_few() -> None:
     # Only models below min_b.
     small = [

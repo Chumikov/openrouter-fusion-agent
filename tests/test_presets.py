@@ -7,6 +7,7 @@ import pytest
 
 from fusion_agent.presets import (
     DEFAULT_CONFIG,
+    MIN_PANEL_SIZE,
     get_config,
     panel_candidates,
     pick_panel,
@@ -41,17 +42,16 @@ def test_pick_panel_default() -> None:
     assert pick_panel(DEFAULT_CONFIG) == DEFAULT_CONFIG.primary_panel
 
 
-@pytest.mark.parametrize("size", [1, 2, 3])
+@pytest.mark.parametrize("size", [2, 3])
 def test_pick_panel_shrinks(size: int) -> None:
     assert pick_panel(DEFAULT_CONFIG, size) == DEFAULT_CONFIG.primary_panel[:size]
 
 
-def test_pick_panel_invalid_size() -> None:
-    with pytest.raises(ValueError, match="panel_size"):
-        pick_panel(DEFAULT_CONFIG, 0)
-    primary_len = len(DEFAULT_CONFIG.primary_panel)
-    with pytest.raises(ValueError, match="panel_size"):
-        pick_panel(DEFAULT_CONFIG, primary_len + 1)
+def test_pick_panel_rejects_below_minimum() -> None:
+    with pytest.raises(ValueError, match=">= 2"):
+        pick_panel(DEFAULT_CONFIG, MIN_PANEL_SIZE - 1)
+    with pytest.raises(ValueError, match=">= 2"):
+        pick_panel(DEFAULT_CONFIG, 1)
 
 
 # --- panel_candidates -------------------------------------------------------
