@@ -17,7 +17,7 @@ from .discovery import (
     select_models,
 )
 from .errors import FusionError
-from .fusion import ProgressUpdate, estimate_request_count, run_fusion
+from .fusion import estimate_request_count, run_fusion
 from .http import build_client
 from .install import install_skill, print_config
 from .presets import get_config, pick_panel
@@ -71,11 +71,6 @@ async def _one_shot(args: argparse.Namespace) -> int:
             return 3
         rpd_cap = args.budget if args.budget is not None else info.daily_free_rpd
         tracker = BudgetTracker(rpd_cap=rpd_cap)
-
-        async def report(update: ProgressUpdate) -> None:
-            pct = f" {update.percent}%" if update.percent is not None else ""
-            print(f"  [{update.elapsed:.0f}s{pct}] {update.message}", file=sys.stderr)
-
         result = await run_fusion(
             client,
             question,
@@ -83,7 +78,6 @@ async def _one_shot(args: argparse.Namespace) -> int:
             force=(args.force == "on"),
             panel_size=args.panel,
             tracker=tracker,
-            on_progress=report,
         )
     print(render_result(result))
     return 0 if result.ok else 1
@@ -118,10 +112,6 @@ async def _repl() -> int:
                 rpd_cap = rpd_override if rpd_override is not None else info.daily_free_rpd
                 tracker = BudgetTracker(rpd_cap=rpd_cap)
 
-                async def report(update: ProgressUpdate) -> None:
-                    pct = f" {update.percent}%" if update.percent is not None else ""
-                    print(f"  [{update.elapsed:.0f}s{pct}] {update.message}", file=sys.stderr)
-
                 try:
                     result = await run_fusion(
                         client,
@@ -130,7 +120,6 @@ async def _repl() -> int:
                         force=force,
                         panel_size=panel,
                         tracker=tracker,
-                        on_progress=report,
                     )
                 except FusionError as exc:
                     print(f"error: {exc}", file=sys.stderr)

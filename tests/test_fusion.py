@@ -11,7 +11,6 @@ import respx
 from fusion_agent.budget import BudgetTracker
 from fusion_agent.errors import FusionAPIError, FusionBudgetError
 from fusion_agent.fusion import (
-    ProgressUpdate,
     build_payload,
     estimate_request_count,
     parse_completion,
@@ -286,7 +285,7 @@ async def test_run_fusion_all_candidates_exhausted(
 
     monkeypatch.setattr("fusion_agent.fusion.probe_model", _probe_false)
     respx.post(CHAT_URL).mock(return_value=httpx.Response(429, json=sample_error_response()))
-    with pytest.raises(FusionAPIError, match="all model candidates exhausted"):
+    with pytest.raises(FusionAPIError, match="no model produced a valid answer"):
         await run_fusion(client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000))
 
 
@@ -388,23 +387,78 @@ async def test_run_fusion_rotates_when_model_calls_wrong_tool(
     assert any("web_search" in entry for entry in result.models_tried)
 
 
+# --- garbage answer detection -----------------------------------------------
+
+
+def test_parse_completion_rejects_xml_tool_call_leakage() -> None:
+    """Content that is raw XML tool-call syntax → error."""
+    data = sample_completion(
+        answer="<tool_call>\n<function=openrouter_fusion>\n<parameter=prompt>test"
+    )
+    result = parse_completion(data, panel=CONFIG.primary_panel, config=CONFIG, request_count=5)
+    assert result.status == "error"
+    assert "invalid output" in (result.failure_reason or "")
+
+
+def test_parse_completion_rejects_garbled_text() -> None:
+    """Content with mostly special characters → error."""
+    data = sample_completion(answer="**{{}}]]>>??//~~@@##$$%%^^&&**(())")
+    result = parse_completion(data, panel=CONFIG.primary_panel, config=CONFIG, request_count=5)
+    assert result.status == "error"
+
+
+def test_parse_completion_accepts_valid_short_answer() -> None:
+    """Short but valid answer → ok (not garbage)."""
+    data = sample_completion(answer="2 + 2 = 4.")
+    result = parse_completion(data, panel=CONFIG.primary_panel, config=CONFIG, request_count=5)
+    assert result.status == "ok"
+
+
 @respx.mock
-async def test_run_fusion_progress_notifications(
+async def test_run_fusion_rotates_on_garbage_answer(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """on_progress callback receives ProgressUpdate messages during execution."""
+    """Primary model produces XML garbage → rotate to backup that gives valid answer."""
     _no_backoff(monkeypatch)
-    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=sample_completion(answer="ok")))
-    messages: list[str] = []
+    primary = CONFIG.primary_outer
+    backup = CONFIG.outer[1]
 
-    async def capture(update: ProgressUpdate) -> None:
-        messages.append(update.message)
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _request_model(request) == primary:
+            return httpx.Response(
+                200,
+                json=sample_completion(
+                    answer="<tool_call><function=foo></tool_call>", model=primary
+                ),
+            )
+        return httpx.Response(
+            200, json=sample_completion(answer="Valid answer here.", model=backup)
+        )
 
-    result = await run_fusion(
-        client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000), on_progress=capture
-    )
+    respx.post(CHAT_URL).mock(side_effect=handler)
+    result = await run_fusion(client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000))
     assert result.ok
-    # At minimum: model composition, "Sending fusion request", "Fusion complete"
-    assert any("outer=" in m for m in messages)
-    assert any("Sending fusion request" in m for m in messages)
-    assert any("Fusion complete" in m for m in messages)
+    assert result.outer == backup
+    assert result.final_answer == "Valid answer here."
+    assert result.models_tried is not None
+
+
+@respx.mock
+async def test_run_fusion_all_garbage_raises_clear_error(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All models produce garbage → clear error message."""
+    _no_backoff(monkeypatch)
+
+    async def _probe_true(_client: httpx.AsyncClient, _model: str) -> bool:
+        return True
+
+    monkeypatch.setattr("fusion_agent.fusion.probe_model", _probe_true)
+
+    respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(
+            200, json=sample_completion(answer="<tool_call><function=x></tool_call>")
+        )
+    )
+    with pytest.raises(FusionAPIError, match="no model produced a valid answer"):
+        await run_fusion(client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000))

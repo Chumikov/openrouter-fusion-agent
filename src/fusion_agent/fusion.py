@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -37,24 +35,10 @@ BACKOFF_MAX = 20.0
 RETRY_AFTER_SHORT = 10.0  # seconds; if Retry-After <= this, wait + retry same model
 
 PROBE_TIMEOUT = 15.0
-HEARTBEAT_INTERVAL = 15.0  # seconds between progress heartbeats during HTTP wait
 DEFAULT_MAX_COMPLETION_TOKENS = 5000
-ESTIMATED_RUN_SECONDS = 120.0  # rough estimate for progress percentage
 
 # Default per-run cost estimate (free models == $0).
 FREE_COST_USD = 0.0
-
-
-@dataclass
-class ProgressUpdate:
-    """A progress notification sent during fusion execution."""
-
-    message: str
-    elapsed: float = 0.0
-    percent: int | None = None
-
-
-ProgressCallback = Callable[[ProgressUpdate], Awaitable[None]]
 
 
 @dataclass
@@ -178,6 +162,20 @@ def _find_midstream_error(choice: dict[str, Any]) -> tuple[int, str] | None:
     return None
 
 
+def _is_valid_answer(content: str) -> bool:
+    """Check whether *content* is a coherent answer (not garbage/XML leakage)."""
+    stripped = content.strip()
+    if not stripped:
+        return False
+    # XML tool-call leakage: model output raw function-call syntax as text.
+    lower = stripped.lower()
+    if lower.startswith(("<tool_call", "<function", "<parameter")):
+        return False
+    # Garbled text: too many special characters relative to alphanumeric.
+    valid = sum(c.isalnum() or c.isspace() for c in stripped)
+    return valid / len(stripped) >= 0.5
+
+
 def parse_completion(
     data: dict[str, Any],
     *,
@@ -223,6 +221,10 @@ def parse_completion(
                 failure_reason = f"model called {', '.join(names)} instead of fusion"
         else:
             failure_reason = "model returned no content"
+
+    # Content exists but is garbage (raw XML tool-call leakage, garbled text).
+    if not failure_reason and final_answer and not _is_valid_answer(str(final_answer)):
+        failure_reason = "model produced invalid output"
 
     if failure_reason:
         status = "error"
@@ -279,41 +281,6 @@ async def probe_model(client: httpx.AsyncClient, model: str) -> bool:
         return response.status_code < 400
     except httpx.HTTPError:
         return False
-
-
-async def _post_with_heartbeat(
-    client: httpx.AsyncClient,
-    payload: dict[str, Any],
-    *,
-    max_retries: int = MAX_RETRIES,
-    on_progress: ProgressCallback | None = None,
-    start_time: float = 0.0,
-) -> dict[str, Any]:
-    """Wrap _post_with_retry with periodic progress heartbeats."""
-    if on_progress is None:
-        return await _post_with_retry(client, payload, max_retries=max_retries)
-
-    if start_time == 0.0:
-        start_time = time.monotonic()
-
-    task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
-        _post_with_retry(client, payload, max_retries=max_retries)
-    )
-    while True:
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_INTERVAL)
-        except TimeoutError:
-            if not task.done():
-                elapsed = time.monotonic() - start_time
-                pct = min(5 + int(elapsed / ESTIMATED_RUN_SECONDS * 85), 90)
-                await on_progress(
-                    ProgressUpdate(
-                        message=f"Still processing ({elapsed:.0f}s elapsed)...",
-                        elapsed=elapsed,
-                        percent=pct,
-                    )
-                )
-            continue
 
 
 async def _post_with_retry(
@@ -404,22 +371,10 @@ async def run_fusion(
     tracker: BudgetTracker | None = None,
     max_completion_tokens: int | None = DEFAULT_MAX_COMPLETION_TOKENS,
     max_tool_calls: int | None = None,
-    on_progress: ProgressCallback | None = None,
 ) -> FusionResult:
     """Execute a single fusion deliberation with automatic model rotation."""
     panels = _resolve_panels(config, panel_size)
     request_count = estimate_request_count(panels[0])
-    start = time.monotonic()
-
-    async def _progress(msg: str, percent: int | None = None) -> None:
-        if on_progress is not None:
-            elapsed = time.monotonic() - start
-            await on_progress(ProgressUpdate(message=msg, elapsed=elapsed, percent=percent))
-
-    await _progress(
-        f"outer={config.primary_outer}, panel={list(panels[0])}, judge={config.primary_judge}",
-        percent=2,
-    )
 
     if tracker is not None:
         await tracker.throttle_rpm(request_count)
@@ -435,12 +390,10 @@ async def run_fusion(
 
     for o_idx, outer_model in enumerate(outer_models):
         if o_idx > 0:
-            await _progress(f"Probing backup: {outer_model}...")
             if not await probe_model(client, outer_model):
                 tried.append(f"{outer_model}: unavailable (probe)")
                 if tracker is not None:
                     tracker.record(1)
-                await _progress(f"{outer_model}: unavailable, trying next...")
                 continue
             if tracker is not None:
                 tracker.record(1)
@@ -463,26 +416,15 @@ async def run_fusion(
                     max_tool_calls=max_tool_calls,
                 )
 
-                await _progress(
-                    f"Sending fusion request to {outer_model} "
-                    f"(panel={len(resolved_panel)}, judge={judge_model})...",
-                    percent=5,
-                )
-
                 try:
-                    data = await _post_with_heartbeat(
+                    data = await _post_with_retry(
                         client,
                         payload,
                         max_retries=MAX_RETRIES if is_last else 1,
-                        on_progress=on_progress,
-                        start_time=start,
                     )
                 except FusionAPIError as exc:
                     if not is_last and _is_rotatable(exc):
                         tried.append(f"{outer_model}: HTTP {exc.status_code} ({exc.error_type})")
-                        await _progress(
-                            f"{outer_model}: HTTP {exc.status_code}, rotating to next model..."
-                        )
                         break
                     raise
 
@@ -492,12 +434,11 @@ async def run_fusion(
                 result.outer = outer_model
                 result.judge = judge_model
 
-                if result.status != "ok" and result.failure_reason and not is_last:
+                if result.status != "ok" and result.failure_reason:
                     tried.append(f"fusion[{outer_model}/{judge_model}]: {result.failure_reason}")
-                    await _progress(
-                        f"{outer_model}: {result.failure_reason}, trying next composition..."
-                    )
-                    continue
+                    if not is_last:
+                        continue
+                    break  # last candidate also failed → exhaustion error
 
                 if tracker is not None:
                     tracker.record(request_count)
@@ -505,16 +446,14 @@ async def run_fusion(
                     result.cost_usd = FREE_COST_USD
                 if tried:
                     result.models_tried = tried
-                await _progress(f"Fusion complete: status={result.status}", percent=100)
                 return result
             else:
                 continue
             break
 
-    await _progress("All model candidates exhausted")
     raise FusionAPIError(
-        f"all model candidates exhausted; tried: {'; '.join(tried) or 'none'}",
-        status_code=429,
+        f"no model produced a valid answer; tried: {'; '.join(tried) or 'none'}",
+        status_code=502,
     )
 
 
@@ -528,7 +467,6 @@ def _resolve_panels(config: ModelConfig, panel_size: int | None) -> list[tuple[s
 __all__ = [
     "FusionResult",
     "KeyInfo",
-    "ProgressUpdate",
     "build_payload",
     "estimate_request_count",
     "get_key_info",

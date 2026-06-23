@@ -9,7 +9,7 @@ Run with ``fusion-agent --mcp`` (stdio transport). Tools:
 
 from typing import Any
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 
 from .budget import BudgetTracker, get_key_info
 from .discovery import (
@@ -19,7 +19,7 @@ from .discovery import (
     select_models,
 )
 from .errors import FusionError
-from .fusion import FusionResult, ProgressUpdate, estimate_request_count, run_fusion
+from .fusion import FusionResult, estimate_request_count, run_fusion
 from .http import build_client
 from .presets import get_config, pick_panel, reload_config
 
@@ -48,16 +48,14 @@ async def fusion_query(
     question: str,
     force: bool = True,
     panel_size: int | None = None,
-    *,
-    ctx: Context,  # type: ignore[type-arg]
 ) -> dict[str, Any]:
     """Run an OpenRouter Fusion multi-model deliberation using free models.
 
     Use for research, compare/contrast, expert critique, or any task where the
     cost of being wrong outweighs a few extra completions. Returns the outer
     model's final answer plus best-effort structured analysis and panel
-    responses when OpenRouter echoes them. If a model is unavailable (429/5xx),
-    backup models are tried automatically.
+    responses when OpenRouter echoes them. If a model is unavailable (429/5xx)
+    or produces invalid output, backup models are tried automatically.
 
     Args:
         question: The prompt to deliberate on.
@@ -67,12 +65,6 @@ async def fusion_query(
     try:
         client, tracker, _info = await _ensure()
         config = get_config()
-
-        async def report(update: ProgressUpdate) -> None:
-            await ctx.info(update.message)
-            if update.percent is not None:
-                await ctx.report_progress(update.percent, 100)
-
         result: FusionResult = await run_fusion(
             client,
             question,
@@ -80,7 +72,6 @@ async def fusion_query(
             force=force,
             panel_size=panel_size,
             tracker=tracker,
-            on_progress=report,
         )
         return result.to_dict()
     except FusionError as exc:
@@ -109,11 +100,7 @@ async def fusion_status() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def fusion_refresh_models(
-    min_b: int = 20,
-    *,
-    ctx: Context,  # type: ignore[type-arg]
-) -> dict[str, Any]:
+async def fusion_refresh_models(min_b: int = 20) -> dict[str, Any]:
     """Discover current free models from OpenRouter and update the local selection.
 
     Queries ``GET /api/v1/models``, filters for free models with tool support,
@@ -127,13 +114,10 @@ async def fusion_refresh_models(
     """
     try:
         client, _tracker, _info = await _ensure()
-        await ctx.info("Querying OpenRouter model catalog...")
         models = await fetch_free_tool_models(client)
-        await ctx.info(f"Found {len(models)} free models with tool support")
         selection = select_models(models, min_b=float(min_b))
         path = save_selection(models_file_path(), selection, total_found=len(models))
         reload_config()
-        await ctx.info(f"Saved to {path}")
         return {
             "path": str(path),
             "models_found": len(models),
