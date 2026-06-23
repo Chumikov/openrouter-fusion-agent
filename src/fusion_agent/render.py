@@ -36,6 +36,13 @@ def render_result(result: FusionResult) -> str:
     cost = "n/a" if result.cost_usd is None else f"${result.cost_usd:.6f}"
     lines.append(f"cost:      {cost}")
 
+    if result.models_tried:
+        lines.append("")
+        lines.append(_color("== Models rotated ==", YELLOW))
+        for entry in result.models_tried:
+            lines.append(f"  {entry}")
+        lines.append(f"  {_color(f'→ using {result.outer}', GREEN)}")
+
     if result.failure_reason:
         lines.append("")
         lines.append(_color("== Failure ==", RED))

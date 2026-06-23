@@ -1,71 +1,138 @@
-"""Free-model presets for the panel and judge.
+"""Model configuration: ordered candidate lists for each fusion role.
 
-The panel is deliberately family-diverse so the models produce less correlated
-answers (OpenAI + NVIDIA + Meta for Quality; Google + NVIDIA + OpenAI for
-Budget). Every model here advertises native tool support, which is required
-because the fusion pipeline enables ``openrouter:web_search`` /
-``openrouter:web_fetch`` on every panel and judge call.
+The configuration is loaded from ``models.json`` (written by
+``refresh-models``) when available, falling back to ``DEFAULT_CONFIG``.
+Candidates are ordered by priority — the first entry is the primary model,
+the rest are backups tried in order when the primary is unavailable.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from pathlib import Path
+
+from .discovery import load_selection, models_file_path
+
+logger = logging.getLogger("fusion_agent")
 
 
 @dataclass(frozen=True)
-class Preset:
-    """A resolved fusion configuration."""
+class ModelConfig:
+    """Ordered candidate models for each fusion role (primary first)."""
 
-    name: str
-    outer: str
-    panel: tuple[str, ...]
-    judge: str
+    outer: tuple[str, ...]
+    panel: tuple[tuple[str, ...], ...]
+    judge: tuple[str, ...]
+
+    @property
+    def primary_outer(self) -> str:
+        return self.outer[0]
+
+    @property
+    def primary_judge(self) -> str:
+        return self.judge[0]
+
+    @property
+    def primary_panel(self) -> tuple[str, ...]:
+        return self.panel[0]
 
 
-# Quality preset: strongest diverse free models.
-QUALITY = Preset(
-    name="quality",
-    outer="qwen/qwen3-next-80b-a3b-instruct:free",
-    panel=(
+DEFAULT_CONFIG = ModelConfig(
+    outer=(
+        "qwen/qwen3-next-80b-a3b-instruct:free",
         "openai/gpt-oss-120b:free",
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
         "meta-llama/llama-3.3-70b-instruct:free",
     ),
-    judge="nvidia/nemotron-3-ultra-550b-a55b:free",
-)
-
-# Budget preset: smaller / faster free models.
-BUDGET = Preset(
-    name="budget",
-    outer="qwen/qwen3-next-80b-a3b-instruct:free",
     panel=(
-        "google/gemma-4-26b-a4b-it:free",
-        "nvidia/nemotron-3-nano-30b-a3b:free",
-        "openai/gpt-oss-20b:free",
+        (
+            "openai/gpt-oss-120b:free",
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+        ),
     ),
-    judge="nvidia/nemotron-3-super-120b-a12b:free",
+    judge=(
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "openai/gpt-oss-120b:free",
+    ),
 )
 
-_PRESETS: dict[str, Preset] = {"quality": QUALITY, "budget": BUDGET}
+
+def _from_dict(data: dict[str, object]) -> ModelConfig:
+    """Build a ``ModelConfig`` from a parsed selection file."""
+    outer_raw = data.get("outer")
+    panel_raw = data.get("panel")
+    judge_raw = data.get("judge")
+    if not isinstance(outer_raw, list) or not isinstance(panel_raw, list):
+        raise ValueError("invalid model list format in selection file")
+    if not isinstance(judge_raw, list):
+        raise ValueError("invalid model list format in selection file")
+
+    outer = tuple(str(m) for m in outer_raw)
+    panel = tuple(tuple(str(m) for m in p) for p in panel_raw if isinstance(p, list))
+    judge = tuple(str(m) for m in judge_raw)
+    if not outer or not panel or not judge:
+        raise ValueError("empty model list in selection file")
+    return ModelConfig(outer=outer, panel=panel, judge=judge)
 
 
-def get_preset(name: str) -> Preset:
-    """Return the named preset (``quality`` or ``budget``)."""
-    key = name.strip().lower()
-    if key not in _PRESETS:
-        available = ", ".join(sorted(_PRESETS))
-        raise ValueError(f"unknown preset {name!r}; choose one of: {available}")
-    return _PRESETS[key]
+_cached: ModelConfig | None = None
 
 
-def pick_panel(preset: Preset, size: int | None = None) -> tuple[str, ...]:
-    """Return ``size`` panel models (defaults to the full panel).
+def get_config(path: Path | None = None) -> ModelConfig:
+    """Return the active model configuration (cached, lazy-loaded).
 
-    Keeps the most diverse models first, so shrinking for budget reasons still
-    leaves a healthy mix of families.
+    Reads from *path* (defaults to :func:`~discovery.models_file_path`) on the
+    first call; subsequent calls return the cache.  Use :func:`reload_config`
+    to invalidate.
     """
+    global _cached
+    if _cached is not None:
+        return _cached
+    file_path = path or models_file_path()
+    data = load_selection(file_path)
+    if data is not None:
+        try:
+            _cached = _from_dict(data)
+            logger.info("loaded model config from %s", file_path)
+            return _cached
+        except (KeyError, ValueError, TypeError) as exc:
+            logger.warning("invalid model config in %s (%s); using defaults", file_path, exc)
+    _cached = DEFAULT_CONFIG
+    return _cached
+
+
+def reload_config() -> None:
+    """Invalidate the cache so the next :func:`get_config` re-reads the file."""
+    global _cached
+    _cached = None
+
+
+def pick_panel(config: ModelConfig, size: int | None = None) -> tuple[str, ...]:
+    """Return the primary panel, optionally trimmed to *size* members."""
+    primary = config.primary_panel
     if size is None:
-        return preset.panel
-    if not 1 <= size <= len(preset.panel):
-        raise ValueError(f"panel_size must be between 1 and {len(preset.panel)}, got {size}")
-    return preset.panel[:size]
+        return primary
+    if not 1 <= size <= len(primary):
+        raise ValueError(f"panel_size must be between 1 and {len(primary)}, got {size}")
+    return primary[:size]
+
+
+def panel_candidates(config: ModelConfig, size: int | None = None) -> list[tuple[str, ...]]:
+    """Return all panel compositions (trimmed to *size*), primary first."""
+    result: list[tuple[str, ...]] = []
+    for panel in config.panel:
+        trimmed = panel[:size] if size is not None else panel
+        if trimmed:
+            result.append(trimmed)
+    return result
+
+
+__all__ = [
+    "DEFAULT_CONFIG",
+    "ModelConfig",
+    "get_config",
+    "panel_candidates",
+    "pick_panel",
+    "reload_config",
+]

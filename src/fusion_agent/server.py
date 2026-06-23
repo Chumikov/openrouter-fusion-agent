@@ -2,8 +2,9 @@
 
 Run with ``fusion-agent --mcp`` (stdio transport). Tools:
 
-* ``fusion_query``  - run a multi-model deliberation on free models.
-* ``fusion_status`` - show the current free-tier budget snapshot.
+* ``fusion_query``         - run a multi-model deliberation on free models.
+* ``fusion_status``        - show the current free-tier budget snapshot.
+* ``fusion_refresh_models`` - discover current free models and update the local selection.
 """
 
 from __future__ import annotations
@@ -13,10 +14,16 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from .budget import BudgetTracker, get_key_info
+from .discovery import (
+    fetch_free_tool_models,
+    models_file_path,
+    save_selection,
+    select_models,
+)
 from .errors import FusionError
 from .fusion import FusionResult, estimate_request_count, run_fusion
 from .http import build_client
-from .presets import Preset, get_preset, pick_panel
+from .presets import get_config, pick_panel, reload_config
 
 mcp = FastMCP("openrouter-fusion-agent")
 
@@ -43,28 +50,27 @@ async def fusion_query(
     question: str,
     force: bool = True,
     panel_size: int | None = None,
-    preset: str = "quality",
 ) -> dict[str, Any]:
     """Run an OpenRouter Fusion multi-model deliberation using free models.
 
     Use for research, compare/contrast, expert critique, or any task where the
     cost of being wrong outweighs a few extra completions. Returns the outer
     model's final answer plus best-effort structured analysis and panel
-    responses when OpenRouter echoes them.
+    responses when OpenRouter echoes them. If a model is unavailable (429/5xx),
+    backup models are tried automatically.
 
     Args:
         question: The prompt to deliberate on.
         force: When True (default) the outer model is required to invoke fusion.
         panel_size: Optional panel size (1-3). Smaller when budget is low.
-        preset: "quality" (default) or "budget".
     """
     try:
         client, tracker, _info = await _ensure()
-        resolved: Preset = get_preset(preset)
+        config = get_config()
         result: FusionResult = await run_fusion(
             client,
             question,
-            resolved,
+            config,
             force=force,
             panel_size=panel_size,
             tracker=tracker,
@@ -79,7 +85,8 @@ async def fusion_status() -> dict[str, Any]:
     """Return the OpenRouter free-tier budget snapshot for the current session."""
     try:
         _client, tracker, info = await _ensure()
-        panel = pick_panel(get_preset("quality"))
+        config = get_config()
+        panel = pick_panel(config)
         per_run = estimate_request_count(panel)
         return {
             "key_label": info.label,
@@ -89,6 +96,36 @@ async def fusion_status() -> dict[str, Any]:
             "limit_remaining": info.limit_remaining,
             "has_negative_balance": info.has_negative_balance,
             "budget": tracker.snapshot(per_run),
+        }
+    except FusionError as exc:
+        return {"status": "error", "failure_reason": exc.__class__.__name__, "error": str(exc)}
+
+
+@mcp.tool()
+async def fusion_refresh_models(min_b: int = 20) -> dict[str, Any]:
+    """Discover current free models from OpenRouter and update the local selection.
+
+    Queries ``GET /api/v1/models``, filters for free models with tool support,
+    ranks by parameter count, assigns to roles (outer / panel / judge) with
+    family diversity, and persists the result. The next ``fusion_query`` call
+    will use the updated models automatically.
+
+    Args:
+        min_b: Minimum parameter count (in billions) for model selection. Models
+            smaller than this are excluded. Defaults to 20.
+    """
+    try:
+        client, _tracker, _info = await _ensure()
+        models = await fetch_free_tool_models(client)
+        selection = select_models(models, min_b=float(min_b))
+        path = save_selection(models_file_path(), selection, total_found=len(models))
+        reload_config()
+        return {
+            "path": str(path),
+            "models_found": len(models),
+            "outer": selection["outer"],
+            "panel": selection["panel"],
+            "judge": selection["judge"],
         }
     except FusionError as exc:
         return {"status": "error", "failure_reason": exc.__class__.__name__, "error": str(exc)}

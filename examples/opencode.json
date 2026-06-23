@@ -8,10 +8,7 @@
       "environment": {
         "OPENROUTER_API_KEY": "{file:~/.config/openrouter/api_key}"
       },
-      "timeout": 10000
+      "timeout": 300000
     }
-  },
-  "experimental": {
-    "mcp_timeout": 90000
   }
 }

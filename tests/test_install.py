@@ -64,7 +64,7 @@ def test_print_config_is_valid_json() -> None:
     data = json.loads(print_config())
     assert data["mcp"]["fusion"]["command"][0] == "uvx"
     assert data["mcp"]["fusion"]["enabled"] is True
-    assert data["experimental"]["mcp_timeout"] == 90000
+    assert data["mcp"]["fusion"]["timeout"] == 300000
     # Key is read from a file by default (shell-independent).
     assert (
         data["mcp"]["fusion"]["environment"]["OPENROUTER_API_KEY"]

@@ -10,11 +10,17 @@ import sys
 from . import __version__
 from . import server as server_module
 from .budget import BudgetTracker, get_key_info
+from .discovery import (
+    fetch_free_tool_models,
+    models_file_path,
+    save_selection,
+    select_models,
+)
 from .errors import FusionError
-from .fusion import run_fusion
+from .fusion import estimate_request_count, run_fusion
 from .http import build_client
 from .install import install_skill, print_config
-from .presets import get_preset
+from .presets import get_config, pick_panel
 from .render import render_result, render_status
 
 HELP_TEXT = """\
@@ -23,7 +29,6 @@ fusion-agent commands (inside the REPL):
   /status           show the current free-tier budget snapshot
   /force on|off     toggle forcing fusion on every run (default: on)
   /panel <1|2|3>    set the panel size (default: 3)
-  /preset quality|budget   switch preset (default: quality)
   /budget <n>       override the daily RPD cap manually
   /help             show this help
   /quit             exit
@@ -44,9 +49,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--force", choices=["on", "off"], default="on", help="force fusion on every run"
     )
     parser.add_argument("--panel", type=int, default=None, help="panel size (1-3)")
-    parser.add_argument(
-        "--preset", choices=["quality", "budget"], default="quality", help="model preset"
-    )
     parser.add_argument("--budget", type=int, default=None, help="override daily RPD cap")
     return parser
 
@@ -57,6 +59,7 @@ async def _one_shot(args: argparse.Namespace) -> int:
         print('error: provide a question, e.g.  fusion-agent "compare X and Y"', file=sys.stderr)
         return 2
 
+    config = get_config()
     async with build_client() as client:
         info = await get_key_info(client)
         if info.has_negative_balance:
@@ -68,11 +71,10 @@ async def _one_shot(args: argparse.Namespace) -> int:
             return 3
         rpd_cap = args.budget if args.budget is not None else info.daily_free_rpd
         tracker = BudgetTracker(rpd_cap=rpd_cap)
-        preset = get_preset(args.preset)
         result = await run_fusion(
             client,
             question,
-            preset,
+            config,
             force=(args.force == "on"),
             panel_size=args.panel,
             tracker=tracker,
@@ -84,7 +86,6 @@ async def _one_shot(args: argparse.Namespace) -> int:
 async def _repl() -> int:
     force = True
     panel: int | None = None
-    preset_name = "quality"
     rpd_override: int | None = None
 
     print(HELP_TEXT)
@@ -98,11 +99,13 @@ async def _repl() -> int:
             continue
 
         if not line.startswith("/"):
+            config = get_config()
             async with build_client() as client:
                 info = await get_key_info(client)
                 if info.has_negative_balance:
                     print(
-                        f"error: negative balance (${info.limit_remaining:.2f}) -> HTTP 402 on free models.",
+                        f"error: negative balance (${info.limit_remaining:.2f}) "
+                        "-> HTTP 402 on free models.",
                         file=sys.stderr,
                     )
                     continue
@@ -112,7 +115,7 @@ async def _repl() -> int:
                     result = await run_fusion(
                         client,
                         line,
-                        get_preset(preset_name),
+                        config,
                         force=force,
                         panel_size=panel,
                         tracker=tracker,
@@ -133,14 +136,12 @@ async def _repl() -> int:
         if cmd == "help":
             print(HELP_TEXT)
         elif cmd == "status":
+            config = get_config()
             async with build_client() as client:
                 info = await get_key_info(client)
                 rpd_cap = rpd_override if rpd_override is not None else info.daily_free_rpd
                 tracker = BudgetTracker(rpd_cap=rpd_cap)
-                from .fusion import estimate_request_count
-                from .presets import pick_panel
-
-                per_run = estimate_request_count(pick_panel(get_preset(preset_name), panel))
+                per_run = estimate_request_count(pick_panel(config, panel))
                 print(render_status(tracker.snapshot(per_run), info.label, info.limit_remaining))
         elif cmd == "force":
             force = arg.lower() in {"on", "true", "1", "yes"}
@@ -151,10 +152,6 @@ async def _repl() -> int:
             except ValueError:
                 panel = None
             print(f"panel = {panel}")
-        elif cmd == "preset":
-            if arg in {"quality", "budget"}:
-                preset_name = arg
-            print(f"preset = {preset_name}")
         elif cmd == "budget":
             try:
                 rpd_override = int(arg) if arg else None
@@ -198,9 +195,58 @@ def _run_print_config(_rest: list[str]) -> int:
     return 0
 
 
+def _run_refresh_models(rest: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="fusion-agent refresh-models",
+        description="Discover current free models from OpenRouter and update the local selection.",
+    )
+    parser.add_argument(
+        "--min-b", type=float, default=20, help="minimum parameter count in billions (default: 20)"
+    )
+    parser.add_argument(
+        "--print-only", action="store_true", help="show the selection without writing the file"
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="overwrite an existing models.json file"
+    )
+    ns = parser.parse_args(rest)
+
+    path = models_file_path()
+    if path.exists() and not ns.force and not ns.print_only:
+        print(f"error: {path} already exists; re-run with --force to overwrite.", file=sys.stderr)
+        return 1
+
+    async def _do() -> int:
+        async with build_client() as client:
+            models = await fetch_free_tool_models(client)
+        if not models:
+            print("error: no free models with tool support found.", file=sys.stderr)
+            return 1
+        selection = select_models(models, min_b=ns.min_b)
+        print(f"found {len(models)} free models with tool support")
+        print(f"outer: {' → '.join(selection['outer'])}")
+        for i, p in enumerate(selection["panel"]):
+            label = "primary" if i == 0 else f"backup {i}"
+            print(f"panel ({label}): {', '.join(p)}")
+        print(f"judge: {' → '.join(selection['judge'])}")
+        if ns.print_only:
+            return 0
+        save_selection(path, selection, total_found=len(models))
+        print(f"\nsaved → {path}")
+        print("restart opencode (or the next fusion_query) to use the new models.")
+        return 0
+
+    try:
+        return asyncio.run(_do())
+    except FusionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 _SUBCOMMANDS = {
     "install-skill": _run_install_skill,
     "print-config": _run_print_config,
+    "refresh-models": _run_refresh_models,
 }
 
 
