@@ -92,11 +92,13 @@ def test_parse_completion_ok_with_analysis() -> None:
     assert result.cost_usd == 0.0
 
 
-def test_parse_completion_degraded_without_answer() -> None:
+def test_parse_completion_no_content_is_error() -> None:
+    """Empty content with no explicit failure → error (triggers rotation)."""
     data = sample_completion(answer="")
     result = parse_completion(data, panel=CONFIG.primary_panel, config=CONFIG, request_count=5)
-    assert result.status == "degraded"
+    assert result.status == "error"
     assert result.final_answer is None
+    assert result.failure_reason is not None
 
 
 def test_parse_completion_error_with_failure_reason() -> None:
@@ -331,3 +333,50 @@ async def test_run_fusion_invalid_json_retries_then_rotates(
     assert result.ok
     assert result.outer == backup
     assert result.models_tried is not None
+
+
+@respx.mock
+async def test_run_fusion_rotates_when_model_calls_wrong_tool(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Model calls web_search instead of fusion → rotate to next model."""
+    _no_backoff(monkeypatch)
+    primary = CONFIG.primary_outer
+    backup = CONFIG.outer[1]
+
+    wrong_tool_response = {
+        "id": "gen-test",
+        "model": primary,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": '{"query": "test"}',
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"cost": 0.0},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _request_model(request) == primary:
+            return httpx.Response(200, json=wrong_tool_response)
+        return httpx.Response(200, json=sample_completion(answer="from backup", model=backup))
+
+    respx.post(CHAT_URL).mock(side_effect=handler)
+    result = await run_fusion(client, "q", CONFIG, tracker=BudgetTracker(rpd_cap=1000))
+    assert result.ok
+    assert result.outer == backup
+    assert result.models_tried is not None
+    assert any("web_search" in entry for entry in result.models_tried)

@@ -189,6 +189,22 @@ def parse_completion(
         if midstream is not None:
             failure_reason = midstream[1] or f"HTTP {midstream[0]}"
 
+    # Model called a different tool (e.g. web_search) instead of fusion,
+    # or returned no content at all — treat as failure so rotation kicks in.
+    if not failure_reason and not final_answer and isinstance(choice, dict):
+        finish = choice.get("finish_reason")
+        if finish == "tool_calls":
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                names = [
+                    str(tc.get("function", {}).get("name", "?"))
+                    for tc in tool_calls
+                    if isinstance(tc, dict)
+                ]
+                failure_reason = f"model called {', '.join(names)} instead of fusion"
+        else:
+            failure_reason = "model returned no content"
+
     if failure_reason:
         status = "error"
     elif final_answer:
@@ -396,7 +412,7 @@ async def run_fusion(
                 result.outer = outer_model
                 result.judge = judge_model
 
-                if result.status == "error" and result.failure_reason and not is_last:
+                if result.status != "ok" and result.failure_reason and not is_last:
                     tried.append(f"fusion[{outer_model}/{judge_model}]: {result.failure_reason}")
                     continue  # server-side panel/judge failure → next combo
 
