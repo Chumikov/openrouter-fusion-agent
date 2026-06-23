@@ -7,8 +7,6 @@ Run with ``fusion-agent --mcp`` (stdio transport). Tools:
 * ``fusion_refresh_models`` - discover current free models and update the local selection.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -51,7 +49,7 @@ async def fusion_query(
     force: bool = True,
     panel_size: int | None = None,
     *,
-    ctx: Context[Any],  # type: ignore[type-arg]
+    ctx: Context,  # type: ignore[type-arg]
 ) -> dict[str, Any]:
     """Run an OpenRouter Fusion multi-model deliberation using free models.
 
@@ -112,7 +110,7 @@ async def fusion_status() -> dict[str, Any]:
 async def fusion_refresh_models(
     min_b: int = 20,
     *,
-    ctx: Context[Any],  # type: ignore[type-arg]
+    ctx: Context,  # type: ignore[type-arg]
 ) -> dict[str, Any]:
     """Discover current free models from OpenRouter and update the local selection.
 
